@@ -20,10 +20,20 @@
 
 #pragma once
 
+#ifndef MKL_BLAS
+#define MKL_BLAS MKL_DOMAIN_BLAS
+#endif
+
+#define EIGEN_USE_MKL_ALL
+
+
 #include <Eigen/Core>
 #include <Eigen/SVD>
 #include <cmath>
 #include <iostream>
+#include <chrono>
+#include <ctime>
+#include "redsvd-h/include/RedSVD/RedSVD.h"
 
 namespace sp {
 namespace ml {
@@ -39,6 +49,20 @@ inline int count_larger_than(const Vector& v, ValueType value) {
   }
 
   return count;
+}
+
+template <typename F>
+void time_it(F&& f) {
+  std::chrono::time_point<std::chrono::system_clock> start, end;
+  start = std::chrono::system_clock::now();
+  f();
+  end = std::chrono::system_clock::now();
+
+  std::chrono::duration<double> elapsed_seconds = end-start;
+  std::time_t end_time = std::chrono::system_clock::to_time_t(end);
+
+  std::cout << "finished computation at " << std::ctime(&end_time)
+            << "elapsed time: " << elapsed_seconds.count() << "s\n";
 }
 
 /**
@@ -62,6 +86,8 @@ void robust_pca_inexact_alm(
   const int M = D.rows();
   const int N = D.cols();
 
+  std::cout << M << 'x' << N << std::endl;
+
   using std::cout;
   using std::endl;
 
@@ -75,7 +101,11 @@ void robust_pca_inexact_alm(
   const double lambda = 1.0 / sqrt(std::max(M, N));
   const double rho = 1.5;
 
-  Eigen::JacobiSVD<Matrix> svd_only_singlar_values(Y);
+  //using SVD_ALGO = RedSVD::RedSVD<Matrix>;
+  //using SVD_ALGO = Eigen::JacobiSVD<Matrix>;
+  using SVD_ALGO = Eigen::BDCSVD<Matrix>;
+
+  SVD_ALGO svd_only_singlar_values(Y, Eigen::EigenvaluesOnly);
   const double norm_two =
       svd_only_singlar_values.singularValues()(0);  // can be tuned
   const double norm_inf = Y.array().abs().maxCoeff() / lambda;
@@ -87,26 +117,34 @@ void robust_pca_inexact_alm(
   const double mu_bar = mu * 1.0e+7;
 
   bool converged = false;
-  int max_iter = 1000;
+  int max_iter = 50;
   double error_tolerance = 1.0e-7;
   int iter = 0;
   int total_svd = 0;
   int sv = 10;
   while (!converged) {
+    Matrix Y_over_mu = (1.0 / mu) * Y;
+
     // update sparse matrix E
-    Array temp_T = D - A + (1.0 / mu) * Y;
+    Array temp_T = D - A + Y_over_mu;
     E = (temp_T - lambda / mu).max(zero) + (temp_T + lambda / mu).min(zero);
 
+    /*
     // force non-negative
     E = E.array().max(zero);  // 論文には書いてない
                               //cout << E << endl;
+    */
 
-    // SVD
-    Eigen::JacobiSVD<Matrix> svd(D - E + 1.0 / mu * Y,
-                                 Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Matrix U = svd.matrixU();
-    Matrix V = svd.matrixV();
-    Vector singularValues = svd.singularValues();
+    // SVD to get eigen values first
+    Vector singularValues;
+    Matrix U, V;
+    auto svd_eig_op = [&]() {
+      SVD_ALGO svd(D - E + Y_over_mu, Eigen::ComputeThinU | Eigen::ComputeFullV);
+      singularValues = svd.singularValues();
+      U = svd.matrixU();
+      V = svd.matrixV();
+    };
+    time_it(svd_eig_op);
 
     // trancate dimention
     int svp = count_larger_than(singularValues, 1 / mu);
@@ -115,6 +153,7 @@ void robust_pca_inexact_alm(
     } else {
       sv = std::min(svp + static_cast<int>(0.05 * N + 0.5), N);
     }
+    std::cout << svp << std::endl;
 
     // update A
     Matrix S_th =
@@ -131,6 +170,8 @@ void robust_pca_inexact_alm(
 
     // objective function
     double objective = Z.norm() / d_norm;
+
+    cout << iter << ": " << objective << endl;
 
     if (objective < error_tolerance) {
       converged = true;
@@ -154,6 +195,7 @@ template <class ValueType = float>
 void robust_pca(Eigen::Matrix<ValueType, Eigen::Dynamic, Eigen::Dynamic>& D,
                 Eigen::Matrix<ValueType, Eigen::Dynamic, Eigen::Dynamic>& A,
                 Eigen::Matrix<ValueType, Eigen::Dynamic, Eigen::Dynamic>& E) {
+  std::cout << "robust pca ..." << std::endl;
   internal::robust_pca_inexact_alm(D, A, E);
 }
 
